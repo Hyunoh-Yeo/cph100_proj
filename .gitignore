@@ -1,9 +1,10 @@
 data/
 out/
+out_test/
+checkpoints/
 *.parquet
 *.csv.gz
+*.log
 __pycache__/
 .ipynb_checkpoints/
 .DS_Store
-*.log
-out_test/

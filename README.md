@@ -32,23 +32,29 @@ Run everything from the repo root, in this order.
 python src/prepare_data.py   # reads all .psv files once, writes data/all.parquet (about 1 min)
 python src/explore.py        # optional, prints stay counts, sepsis rates and measurement rates by hospital
 python src/utility.py        # optional, checks our utility score against the official implementation
-python src/train_lgbm.py     # trains both LightGBM variants and writes out/ (under 1 min)
+python src/train.py          # trains every model in src/models and writes out/ and checkpoints/ (a few min on CPU)
 ```
 
-`python src/train_lgbm.py 3000` runs on a random subset of 3,000 stays and writes to `out_test/` instead, which is handy for checking changes quickly.
+`python src/train.py --models lgbm` trains only the listed models and keeps the other models' columns and metrics already in `out/`. `python src/train.py --subset 3000` runs on a random subset of 3,000 stays and writes to `out_test/` instead, which is handy for checking changes quickly.
+
+If you created the environment before PyTorch was added, run `conda install -c conda-forge pytorch` inside `cph100`. Without PyTorch, `--models lgbm` still works.
 
 ### 4. Expected results
 
 With the default seed (0) the full run should print numbers close to these.
 
-| variant | split | AUROC | AUPRC | utility at A_val threshold |
-|---|---|---|---|---|
-| full | A_test | 0.807 | 0.107 | 0.413 |
-| full | B | 0.760 | 0.062 | 0.260 |
-| no_pattern | A_test | 0.786 | 0.099 | 0.371 |
-| no_pattern | B | 0.792 | 0.066 | 0.293 |
+| model | variant | split | AUROC | AUPRC | utility at A_val threshold |
+|---|---|---|---|---|---|
+| lgbm | full | A_test | 0.807 | 0.107 | 0.413 |
+| lgbm | full | B | 0.760 | 0.062 | 0.260 |
+| lgbm | no_pattern | A_test | 0.786 | 0.099 | 0.371 |
+| lgbm | no_pattern | B | 0.792 | 0.066 | 0.293 |
+| gru | full | A_test | 0.787 | 0.087 | 0.362 |
+| gru | full | B | 0.773 | 0.063 | 0.214 |
+| gru | no_pattern | A_test | 0.754 | 0.077 | 0.304 |
+| gru | no_pattern | B | 0.760 | 0.059 | 0.178 |
 
-Small differences can come from LightGBM version or thread count.
+Small differences can come from LightGBM or PyTorch version and thread count. The GRU numbers move more between runs than the LightGBM ones.
 
 ## What the code does
 
@@ -58,7 +64,14 @@ Small differences can come from LightGBM version or thread count.
 
 `src/utility.py` implements the Challenge utility score following the official `evaluate_sepsis_score.py`.
 
-`src/train_lgbm.py` splits hospital A by patient into 70% train, 15% validation and 15% test with seed 0. Hospital B is never used for training or tuning. It trains LightGBM twice, once with all 124 features (`full`) and once without the 68 measurement-pattern features (`no_pattern`), with early stopping on A validation AUROC. The decision threshold is chosen to maximize utility on A validation and applied unchanged to A test and B.
+`src/models/` has one class per model, all with the same interface. `fit(X, y, stay, train_rows, val_rows)` trains on the training rows and early-stops on the validation rows, `predict(X, stay, rows)` returns one probability per selected row, and `save(path)` / `load(path)` store and restore the model. `stay` gives the stay of each row, which the GRU needs to build sequences.
+
+* `lgbm.py` (`LGBMModel`) treats every patient-hour as an independent row and early-stops on A validation AUROC.
+* `gru.py` (`GRUModel`) is a one-layer unidirectional GRU (hidden size 64) that reads each stay hour by hour and outputs a probability at every hour, so it also only uses past hours. Inputs are standardized with hospital A train statistics and missing values are set to the train mean. It uses Adam (lr 1e-3, 64 stays per batch) with early stopping on A validation AUROC (patience 3).
+
+To add a model, write a class with the same interface in a new file under `src/models/` and register it in `src/models/__init__.py`.
+
+`src/train.py` splits hospital A by patient into 70% train, 15% validation and 15% test with seed 0. Hospital B is never used for training or tuning. It trains every model twice, once with all 124 features (`full`) and once without the 68 measurement-pattern features (`no_pattern`). The decision threshold is chosen to maximize utility on A validation and applied unchanged to A test and B.
 
 ## Outputs (`out/`)
 
@@ -73,11 +86,11 @@ Small differences can come from LightGBM version or thread count.
 | iculos | hours since ICU admission, from the data |
 | label | Challenge SepsisLabel, which turns 1 six hours before onset |
 | onset_t | sepsis onset hour, equal to the first positive label hour + 6 (empty if never septic) |
-| prob_full, prob_no_pattern | predicted probability from each variant |
+| prob_<model>_<variant> | predicted probability, e.g. prob_lgbm_full, prob_gru_no_pattern |
 
 Lead time should be measured against `onset_t`, not the first positive label. Thresholds and alert policies should be tuned on `A_val` and reported on `A_test` and `B`.
 
-`metrics.json` and `metrics.csv` hold the numbers above, and `importance_full.csv` / `importance_no_pattern.csv` hold LightGBM gain importance.
+`metrics.csv` / `metrics.json` hold the numbers above for every model, variant and split, and `importance_lgbm_full.csv` / `importance_lgbm_no_pattern.csv` hold LightGBM gain importance. Saved models go to `checkpoints/<model>_<variant>.txt` (LightGBM) or `.pt` (GRU), which is gitignored.
 
 ## Notes
 
